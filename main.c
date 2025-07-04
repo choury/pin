@@ -136,7 +136,7 @@ int main(int argc, char *argv[]) {
 
     //create unix socket {cmd}-{pid}.sock in socket dir
     sprintf(path + strlen(path), "/%s-%d.sock", basename(args.argv[0]), getpid());
-    int cfd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    int cfd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
     if (cfd == -1) {
         errExit("create socket");
     }

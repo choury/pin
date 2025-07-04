@@ -104,10 +104,12 @@ int mode = 0;
 #define MODE_NORMAL   0
 #define MODE_ESC      1
 #define MODE_CSI      2
-#define MODE_ZMODEM_1 3
-#define MODE_ZMODEM_2 4
-#define MODE_ZMODEM_3 5
-#define MODE_ZMODEM   6
+#define MODE_OSC      3
+
+#define MODE_ZMODEM_1 11
+#define MODE_ZMODEM_2 12
+#define MODE_ZMODEM_3 13
+#define MODE_ZMODEM   14
 
 char csi_buffer[32];
 size_t csi_len = 0;
@@ -131,6 +133,11 @@ void add_history(const char* data, size_t len) {
                 csi_buffer[0] = '\033';
                 csi_buffer[1] = '[';
                 csi_len = 2;
+            } else if(data[i] == ']') {
+                mode = MODE_OSC;
+                csi_buffer[0] = '\033';
+                csi_buffer[1] = ']';
+                csi_len = 2;
             } else {
                 mode = MODE_NORMAL;
                 cbuffer_push(alter_screen?&alter_buffer:&main_buffer, '\033');
@@ -147,7 +154,7 @@ void add_history(const char* data, size_t len) {
                 break;
             }
             if(data[i] >= 0x40 && data[i] <= 0x7e) {
-                printf("finish csi mode: [%.*s]\n", csi_len-2, csi_buffer+2);
+                printf("finish csi mode: [%.*s]\n", (int)csi_len-2, csi_buffer+2);
                 mode = MODE_NORMAL;
                 int enter_alt_screen = 0;
                 if(memcmp(csi_buffer, "\033[?1049h", csi_len) == 0 || memcmp(csi_buffer, "\033[?47h", csi_len) == 0) {
@@ -182,6 +189,36 @@ void add_history(const char* data, size_t len) {
                 if(enter_alt_screen) {
                     alter_screen = 1;
                 }
+                csi_len = 0;
+            }
+            break;
+        case MODE_OSC:
+            assert(csi_len >= 2);
+            csi_buffer[csi_len++] = data[i];
+            if(csi_len >= sizeof(csi_buffer)) {
+                mode = MODE_NORMAL;
+                cbuffer_write(alter_screen?&alter_buffer:&main_buffer, csi_buffer, csi_len);
+                csi_len = 0;
+                break;
+            }
+            // Terminator can be BEL (7) or ST (ESC \)
+            if(csi_len >= 6 && (data[i] == '\007' || (data[i] == '\\' && csi_buffer[csi_len-2] == '\033'))) {
+                if(data[i] == '\007') {
+                    printf("finish osc mode: [%.*s\\a]\n", (int)csi_len-3, csi_buffer+2);
+                    if (csi_buffer[csi_len - 2] == '?') {
+                        csi_len = 0;
+                        printf("filter report sequence\n");
+                    }
+                }else{
+                    printf("finish osc mode: [%.*sESC\\]\n", (int)csi_len-4, csi_buffer+2);
+                    if (csi_buffer[csi_len - 3] == '?') {
+                        csi_len = 0;
+                        printf("filter report sequence\n");
+                    }
+                }
+
+                cbuffer_write(alter_screen?&alter_buffer:&main_buffer, csi_buffer, csi_len);
+                mode = MODE_NORMAL;
                 csi_len = 0;
             }
             break;
