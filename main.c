@@ -6,25 +6,22 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <assert.h>
 #include <unistd.h>
 #include <getopt.h>
 #include <fcntl.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/signalfd.h>
-#include <errno.h>
-#include <unistd.h>
+#include <sys/stat.h>
 #include <sched.h>
 #include <signal.h>
 #include <pty.h>
 #include <limits.h>
-#include <sys/un.h>
-#include <sys/stat.h>
 #include <sys/wait.h>
 
 #include "pin.h"
 #include "history.h"
+#include "server.h"
 
 struct init_args{
     int pty;
@@ -63,9 +60,6 @@ static struct option long_options[] = {
     {0,           0,                 0,  0 }
 };
 
-int attach(const char* socket);
-
-
 #define STACK_SIZE (1024 * 1024)    /* Stack size for cloned child */
 
 int main(int argc, char *argv[]) {
@@ -81,7 +75,7 @@ int main(int argc, char *argv[]) {
         if (c == '?'){
             fprintf(stderr, "Usage: %s [options...] command [args...]\n"
                             " -a/--attach <socket>\n"
-                            " -f/--foreground\n" 
+                            " -f/--foreground\n"
                             " --detach\n", argv[0]);
             return EXIT_FAILURE;
         }
@@ -125,7 +119,6 @@ int main(int argc, char *argv[]) {
     }
 
     //put sock file into /tmp/pin-{uid}/
-    //先确保改目录存在，不存在就创建一个
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "/tmp/pin-%d", getuid());
     if(mkdir(path, 0700) < 0){
@@ -136,36 +129,14 @@ int main(int argc, char *argv[]) {
 
     //create unix socket {cmd}-{pid}.sock in socket dir
     sprintf(path + strlen(path), "/%s-%d.sock", basename(args.argv[0]), getpid());
-    int cfd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
-    if (cfd == -1) {
-        errExit("create socket");
-    }
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(struct sockaddr_un));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
-    if (bind(cfd, (struct sockaddr*)&addr, sizeof(struct sockaddr_un)) == -1) {
-        errExit("bind socket");
-    }
-    if (listen(cfd, 5) == -1) {
-        errExit("listen socket");
-    }
-
-    if(!detach && fork() > 0) {
-        //close all fd
-        for(int i = 3; i < 1024; i++){
-            close(i);
-        }
+    if (!detach && fork() > 0) {
+        close_extra_fds();
         wait(NULL);
         return attach(path);
-    } else {
-        printf("socket path: %s\n", path);
     }
+    int cfd = server_start(path, foreground);
     args.socket = path;
 
-    if(!foreground) {
-        daemon(1, 0);
-    }
     struct winsize ws;
     memset(&ws, 0, sizeof(ws));
     ws.ws_row = 40;
@@ -231,9 +202,7 @@ int main(int argc, char *argv[]) {
         errExit("epoll add signal");
     }
 
-
     int client_fd = -1;
-    init_history();
     // copy date between stdin/stdout and childern's tty
     while(1){
         int n;
@@ -251,17 +220,8 @@ int main(int argc, char *argv[]) {
                 if(evs[i].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)){
                     goto ret;
                 }
-                char buff[MAX_MSG_SIZE];
-                struct message* msg = (struct message*)buff;
-                int ret = read(fd, msg->data, MAX_DATA_SIZE);
-                if(ret <= 0){
+                if(server_send_pty_data(pty_master, client_fd) < 0){
                     goto ret;
-                }
-                add_history(msg->data, ret);
-                msg->type = MSG_TYPE_DATA;
-                msg->len = ret;
-                if(client_fd > 0) {
-                    write(client_fd, buff, sizeof(struct message) + ret);
                 }
             }
             if(fd == client_fd){
@@ -270,18 +230,8 @@ int main(int argc, char *argv[]) {
                     client_fd = -1;
                     continue;
                 }
-                char buff[MAX_MSG_SIZE];
-                int ret = read(fd, buff, sizeof(buff));
-                if(ret <= 0){
+                if(server_handle_client(fd, pty_master) < 0) {
                     goto ret;
-                }
-                struct message* msg = (struct message*)buff;
-                if(msg->type == MSG_TYPE_DATA){
-                    write(pty_master, msg->data, msg->len);
-                }
-                if(msg->type == MSG_TYPE_WSIZE){
-                    struct winsize* ws = (struct winsize*)msg->data;
-                    ioctl(pty_master, TIOCSWINSZ, ws);
                 }
             }else if(fd == sfd){
                 char buff[MAX_MSG_SIZE];
@@ -313,7 +263,7 @@ int main(int argc, char *argv[]) {
                     perror("accept socket");
                     continue;
                 }
-                if(client_fd > 0){
+                if(client_fd >= 0) {
                     //send error if one client already connected
                     struct message msg;
                     msg.type = MSG_TYPE_ERROR;
@@ -321,13 +271,8 @@ int main(int argc, char *argv[]) {
                     write(nfd, &msg, sizeof(msg));
                     close(nfd);
                     continue;
-                } else {
-                    //send accept message
-                    struct message msg;
-                    msg.type = MSG_TYPE_ACCEPT;
-                    msg.len = 0;
-                    write(nfd, &msg, sizeof(msg));
                 }
+                server_send_history(nfd);
                 client_fd = nfd;
                 ev.data.fd = nfd;
                 ev.events = EPOLLIN;
@@ -337,20 +282,6 @@ int main(int argc, char *argv[]) {
                     client_fd = -1;
                     continue;
                 }
-                //发送历史记录
-                int history = history_len();
-                int history_left = history;
-                char buff[MAX_MSG_SIZE];
-                struct message* msg = (struct message*)buff;
-                while(history_left > 0) {
-                    int len = history_read(msg->data, history - history_left, MAX_DATA_SIZE);
-                    msg->type = MSG_TYPE_DATA;
-                    msg->len = len;
-                    write(nfd, buff, sizeof(struct message) + len);
-                    history_left -= len;
-                }
-                printf("sent history, size: %d\n", history);
-
             }
         }
     }

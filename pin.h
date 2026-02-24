@@ -29,3 +29,5 @@ struct message {
 
 
 #define ESC "\033"
+
+int attach(const char* path);

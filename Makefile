@@ -1,6 +1,6 @@
-CFLAGS ?= -std=c99 
+CFLAGS ?= -std=c99
 
-pin: main.o attach.o history.o
+pin: main.o attach.o history.o server.o
 	$(CC) $(CFLAGS) $^ -lutil -o $@
 
 %.o: %.c *.h
