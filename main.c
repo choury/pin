@@ -55,6 +55,7 @@ static int init(void* data) {
 
 static struct option long_options[] = {
     {"attach",    required_argument, 0, 'a'},
+    {"socket",    required_argument, 0, 's'},
     {"foreground",no_argument,       0, 'f'},
     {"detach",    no_argument,       0,  0 },
     {0,           0,                 0,  0 }
@@ -64,25 +65,32 @@ static struct option long_options[] = {
 
 int main(int argc, char *argv[]) {
     const char* attach_socket = NULL;
+    const char* custom_socket = NULL;
     int foreground = 0;
     int detach = 0;
     while (1) {
         int option_index = 0;
 
-        int c = getopt_long(argc, argv, "a:f", long_options, &option_index);
+        int c = getopt_long(argc, argv, "a:s:f", long_options, &option_index);
         if (c == -1)
             break;
         if (c == '?'){
             fprintf(stderr, "Usage: %s [options...] command [args...]\n"
                             " -a/--attach <socket>\n"
+                            " -s/--socket <socket>\n"
                             " -f/--foreground\n"
-                            " --detach\n", argv[0]);
+                            " --detach\n"
+                            "\nSocket path can be a file path or an abstract namespace (prefixed with @)\n", argv[0]);
             return EXIT_FAILURE;
         }
         switch (c) {
         case 'a':
             printf("option -a/--attach with arg %s\n", optarg);
             attach_socket = optarg;
+            break;
+        case 's':
+            printf("option -s/--socket with arg %s\n", optarg);
+            custom_socket = optarg;
             break;
         case 'f':
             printf("option -f/--foreground\n");
@@ -118,17 +126,26 @@ int main(int argc, char *argv[]) {
         args.argc = argc - optind;
     }
 
-    //put sock file into /tmp/pin-{uid}/
     char path[PATH_MAX];
-    snprintf(path, sizeof(path), "/tmp/pin-%d", getuid());
-    if(mkdir(path, 0700) < 0){
-        if(errno != EEXIST){
-            errExit("mkdir socket dir");
+    if (custom_socket) {
+        strncpy(path, custom_socket, sizeof(path) - 1);
+        path[sizeof(path) - 1] = '\0';
+    } else {
+        //put sock file into $TMPDIR/pin-{uid}/ or /tmp/pin-{uid}/
+        const char* tmpdir = getenv("TMPDIR");
+        if (!tmpdir || tmpdir[0] == '\0') {
+            tmpdir = "/tmp";
         }
-    }
+        snprintf(path, sizeof(path), "%s/pin-%d", tmpdir, getuid());
+        if(mkdir(path, 0700) < 0){
+            if(errno != EEXIST){
+                errExit("mkdir socket dir");
+            }
+        }
 
-    //create unix socket {cmd}-{pid}.sock in socket dir
-    sprintf(path + strlen(path), "/%s-%d.sock", basename(args.argv[0]), getpid());
+        //create unix socket {cmd}-{pid}.sock in socket dir
+        sprintf(path + strlen(path), "/%s-%d.sock", basename(args.argv[0]), getpid());
+    }
     if (!detach && fork() > 0) {
         close_extra_fds();
         wait(NULL);
@@ -291,6 +308,9 @@ ret:
     close(sfd);
     close(cfd);
     close(efd);
-    unlink(path);
+    // Only unlink filesystem sockets, not abstract namespace sockets
+    if (path[0] != '@') {
+        unlink(path);
+    }
     return 0;
 }

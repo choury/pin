@@ -11,7 +11,9 @@
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <sys/prctl.h>
+#include <sys/syscall.h>
 #include <limits.h>
+#include <stddef.h>
 
 #include "pin.h"
 #include "history.h"
@@ -19,7 +21,20 @@
 
 
 void close_extra_fds(void) {
-    close_range(3, ~0U, 0);
+    // Try close_range() first (Linux 5.9+)
+#ifdef SYS_close_range
+    if (syscall(SYS_close_range, 3, ~0U, 0) == 0) {
+        return;
+    }
+    // Fallback if syscall not supported
+    if (errno != ENOSYS) {
+        return; // Other error, still done
+    }
+#endif
+    // Fallback: close fds manually
+    for (int i = 3; i <= 1024; i++) {
+        close(i);
+    }
 }
 
 
@@ -87,8 +102,17 @@ int server_start(const char* path, int foreground) {
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(struct sockaddr_un));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
-    if (bind(listen_fd, (struct sockaddr*)&addr, sizeof(struct sockaddr_un)) == -1) {
+    socklen_t addr_len;
+    if (path[0] == '@') {
+        // Abstract namespace socket: first byte is null, rest is the name
+        addr.sun_path[0] = '\0';
+        strncpy(addr.sun_path + 1, path + 1, sizeof(addr.sun_path) - 2);
+        addr_len = offsetof(struct sockaddr_un, sun_path) + strlen(path);  // strlen('@name') = 1 + name_len, but sun_path[0] is null so total = offset + name_len + 1 = offset + strlen(path)
+    } else {
+        strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+        addr_len = sizeof(struct sockaddr_un);
+    }
+    if (bind(listen_fd, (struct sockaddr*)&addr, addr_len) == -1) {
         errExit("bind socket");
     }
     if (listen(listen_fd, 5) == -1) {

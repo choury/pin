@@ -30,20 +30,30 @@ pin --detach command [args...]
 
 # 创建前台分离会话
 pin -f command [args...]
+
+# 使用自定义socket路径
+pin -s /tmp/my-session.sock command [args...]
+
+# 使用抽象命名空间socket
+pin -s @my-session command [args...]
 ```
 
 ### 选项说明
 
 - `-a, --attach <socket>`: 连接到指定的会话套接字
+- `-s, --socket <socket>`: 指定自定义的套接字路径（文件路径或抽象命名空间）
 - `-f, --foreground`: 在前台运行但仍处于分离状态
 - `--detach`: 创建分离的会话（后台运行）
 
 ## 技术细节
 
-- 会话套接字文件保存在 `/tmp/pin-{uid}/{cmd}-{pid}.sock` 目录下
+- 默认情况下，会话套接字文件保存在 `/tmp/pin-{uid}/{cmd}-{pid}.sock` 目录下
   - `{uid}` 是用户 ID
   - `{cmd}` 是命令名
   - `{pid}` 是进程 ID
+- 使用 `-s/--socket` 可指定自定义套接字路径
+- 支持抽象命名空间套接字（以 `@` 开头），例如 `@my-session`
+  - 抽象命名空间套接字不存在于文件系统中，无需手动清理
 - 会话中的程序可通过 `PIN_SOCK` 环境变量获取当前会话的套接字路径
 - 使用 `Ctrl+\` 组合键可从会话中分离
 

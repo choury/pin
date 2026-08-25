@@ -11,6 +11,7 @@
 #include <signal.h>
 #include <sys/signalfd.h>
 #include <fcntl.h>
+#include <stddef.h>
 
 #include "pin.h"
 
@@ -92,8 +93,17 @@ int attach(const char* path) {
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(struct sockaddr_un));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
-    if (connect(cfd, (struct sockaddr*)&addr, sizeof(struct sockaddr_un)) == -1) {
+    socklen_t addr_len;
+    if (path[0] == '@') {
+        // Abstract namespace socket: first byte is null, rest is the name
+        addr.sun_path[0] = '\0';
+        strncpy(addr.sun_path + 1, path + 1, sizeof(addr.sun_path) - 2);
+        addr_len = offsetof(struct sockaddr_un, sun_path) + strlen(path);
+    } else {
+        strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+        addr_len = sizeof(struct sockaddr_un);
+    }
+    if (connect(cfd, (struct sockaddr*)&addr, addr_len) == -1) {
         errExit("connect");
     }
     printf("connected to %s\n", path);
